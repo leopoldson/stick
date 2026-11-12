@@ -26,11 +26,11 @@ def setup(monkeypatch, factory):
 
 def test_webhook_checks_secret_and_replies(monkeypatch, factory):
     sent, client = setup(monkeypatch, factory)
-    assert client.post("/telegram/webhook", json=update("study csc301 trees")).status_code == 403
-    r = client.post("/telegram/webhook", json=update("study csc301 trees"),
+    assert client.post("/telegram/webhook", json=update("study")).status_code == 403
+    r = client.post("/telegram/webhook", json=update("study"),
                     headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"})
     assert r.status_code == 200
-    assert sent and "Timer started" in sent[0][1].text and sent[0][0] == 42
+    assert sent and "Which course" in sent[0][1].text and sent[0][0] == 42
 
 
 def test_webhook_handles_buttons_and_ignores_groups_and_junk(monkeypatch, factory):
@@ -46,8 +46,8 @@ def test_webhook_handles_buttons_and_ignores_groups_and_junk(monkeypatch, factor
 def test_tick_sends_one_reminder_in_daytime_only(monkeypatch, factory):
     sent, client = setup(monkeypatch, factory)
     with factory() as db:
-        handlers.handle(db, 7, "Fav", "study csc301 trees")
-        handlers.handle(db, 7, "Fav", "done 1")
+        for text in ("study", "csc301", "trees", "done 1"):
+            handlers.handle(db, 7, "Fav", text)
         for r in db.scalars(select(models.Review)).all():
             r.due_on = clock.today_local()
         db.commit()

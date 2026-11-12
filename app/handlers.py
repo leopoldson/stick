@@ -28,7 +28,7 @@ class Reply:
 
 WELCOME = (
     "Hi {name}, I'm Stick. I log your study sessions, then bring each topic back right before you'd forget it.\n\n"
-    "study CSC301 binary trees : start a session\n"
+    "study : start a session (pick or type a course, then the topic)\n"
     "done : stop the timer and log it\n"
     "due : what to review today\n"
     "quiz : test yourself\n"
@@ -36,8 +36,12 @@ WELCOME = (
     "stats : your week and streak\n"
     "export : download your Excel log\n"
     "undo : cancel or delete your last session\n\n"
-    "Start with: study <course code> <topic>"
+    "Start with: study"
 )
+COMMAND_NAMES = {
+    "start", "help", "study", "done", "due", "quiz", "addq", "stats",
+    "export", "undo", "courses", "addcourse",
+}
 PASS_WORDS = {"got it", "got", "pass", "yes", "y"}
 FAIL_WORDS = {"missed", "miss", "fail", "no", "n"}
 
@@ -93,11 +97,23 @@ def get_user(db: Session, tg_id: int, name: str) -> User:
     return user
 
 
-def get_course(db: Session, user: User, code: str, create: bool = False) -> Optional[Course]:
-    code = code.upper()
-    course = db.scalar(select(Course).where(Course.user_id == user.id, Course.code == code))
+def norm_course(text: str) -> str:
+    """Tidy what the student typed: 'csc301' -> 'CSC301', 'data structures' -> 'Data structures'."""
+    t = " ".join(text.split())[:30]
+    if any(ch.isdigit() for ch in t):
+        return t.upper()
+    return t[:1].upper() + t[1:]
+
+
+def get_course(db: Session, user: User, name: str, create: bool = False) -> Optional[Course]:
+    name = norm_course(name)
+    if not name:
+        return None
+    course = db.scalar(
+        select(Course).where(Course.user_id == user.id, func.upper(Course.code) == name.upper())
+    )
     if not course and create:
-        course = Course(user_id=user.id, code=code)
+        course = Course(user_id=user.id, code=name)
         db.add(course)
         db.flush()
     return course
@@ -137,13 +153,17 @@ def handle(db: Session, tg_id: int, name: str, text: str) -> list[Reply]:
     user = get_user(db, tg_id, name)
     cmd, arg, slash = parse(text)
     lowered = text.strip().lower()
+    # While we're asking for a course or topic, a lone word like "due" is a command, not a name.
+    typed = not slash and not (cmd in COMMAND_NAMES and not arg)
 
     if cmd == "cb":
         replies = on_callback(db, user, arg)
     elif cmd == "cancel":
         set_state(user, None)
         replies = [Reply("Okay, cancelled.")]
-    elif user.state == "awaiting_topic" and not slash:
+    elif user.state == "awaiting_course" and typed:
+        replies = on_course_typed(db, user, text.strip())
+    elif user.state == "awaiting_topic" and typed:
         replies = on_topic_typed(db, user, text.strip())
     elif user.state == "rating" and cmd in ("1", "2", "3"):
         replies = rate(db, user, int(cmd))
@@ -152,7 +172,7 @@ def handle(db: Session, tg_id: int, name: str, text: str) -> list[Reply]:
     elif user.state == "quiz_answering" and not slash:
         replies = reveal_answer(db, user)
     else:
-        if user.state in ("awaiting_topic", "quiz_answering"):
+        if user.state in ("awaiting_course", "awaiting_topic", "quiz_answering"):
             set_state(user, None)  # they moved on to a different command
         replies = on_command(db, user, cmd, arg)
 
@@ -207,17 +227,25 @@ def cmd_study(db: Session, user: User, arg: str) -> list[Reply]:
     if current:
         mins = round((clock.now_utc() - current.started_at).total_seconds() / 60)
         return [Reply(f"You're already studying {label(current.topic)} ({mins} min in). Send done when you finish, or undo to cancel it.")]
-    if arg:
-        code, _, topic_name = arg.partition(" ")
-        course = get_course(db, user, code, create=True)
-        if topic_name.strip():
-            return begin(db, user, get_topic(db, course, topic_name.strip()))
-        return ask_topic(db, user, course)
+    if arg:  # shortcut: "study Physics" skips the course question
+        return on_course_typed(db, user, arg)
     courses = db.scalars(select(Course).where(Course.user_id == user.id).order_by(Course.code)).all()
+    set_state(user, "awaiting_course")
     if not courses:
-        return [Reply("Which course? Send it like this: study CSC301 binary trees")]
+        return [Reply("Which course are you studying? Type its name or code (for example CSC301). I'll remember it for next time.")]
     buttons = chunk([(c.code, f"cb:course:{c.id}") for c in courses], 2)
-    return [Reply("Which course are you studying?", buttons=buttons)]
+    return [Reply("Which course are you studying? Tap one, or type a new course.", buttons=buttons)]
+
+
+def on_course_typed(db: Session, user: User, text: str) -> list[Reply]:
+    if not norm_course(text):
+        return [Reply("Type the course name or code, for example CSC301.")]
+    existed = get_course(db, user, text) is not None
+    course = get_course(db, user, text, create=True)
+    replies = ask_topic(db, user, course)
+    if not existed:
+        replies[0].text = f"Added {course.code} to your courses.\n\n" + replies[0].text
+    return replies
 
 
 def ask_topic(db: Session, user: User, course: Course) -> list[Reply]:
@@ -232,7 +260,7 @@ def on_topic_typed(db: Session, user: User, text: str) -> list[Reply]:
     course = db.get(Course, get_data(user).get("course_id", 0))
     if not course or course.user_id != user.id:
         set_state(user, None)
-        return [Reply("Let's start again. Send: study CSC301 binary trees")]
+        return [Reply("Let's start again. Send study.")]
     return begin(db, user, get_topic(db, course, text[:200]))
 
 
@@ -381,7 +409,7 @@ def cmd_undo(db: Session, user: User) -> list[Reply]:
 def cmd_courses(db: Session, user: User) -> list[Reply]:
     courses = db.scalars(select(Course).where(Course.user_id == user.id).order_by(Course.code)).all()
     if not courses:
-        return [Reply("No courses yet. They're added automatically the first time you send: study CSC301 binary trees")]
+        return [Reply("No courses yet. Send study and type your first course. I'll remember it.")]
     lines = []
     for c in courses:
         n = db.scalar(select(func.count(Topic.id)).where(Topic.course_id == c.id))

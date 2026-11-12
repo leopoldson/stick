@@ -1,6 +1,6 @@
 # Stick
 
-A study coach on Telegram (`@stickstudy_bot`). Text `study CSC301 trees`, then `done`, and Stick logs the session
+A study coach on Telegram (`@stickstudy_bot`). Text `study`, pick or type a course, then the topic, then `done`, and Stick logs the session
 and brings the topic back at spaced intervals (1, 3, 7, 14, 30 days). Missed it? It returns tomorrow and goes on a revise list.
 Everything exports to Excel.
 
@@ -12,7 +12,7 @@ pip install -r requirements.txt
 cp .env.example .env        # then paste your token after TELEGRAM_BOT_TOKEN=
 python -m app.poll
 ```
-Open `t.me/stickstudy_bot`, send `/start`, then `study csc301 binary trees`. Data goes to a local `stick.db`.
+Open `t.me/stickstudy_bot`, send `/start`, then `study`, type a course (say CSC301) and a topic. Data goes to a local `stick.db`.
 Run the tests with `pip install -r requirements-dev.txt && pytest`.
 
 ## 2. Deploy on Render
@@ -45,6 +45,7 @@ help - Show commands
 Also `/setdescription` and `/setuserpic`. If the token ever leaks, revoke it with `/revoke` in BotFather.
 
 ## Behaviour worth knowing
+- Courses you type are added to your list automatically; next time `study` shows them as buttons. `study Physics` skips the course question.
 - Rating after a session sets the first review: Shaky 1 day, Okay 3 days, Solid 7 days. Got it moves one rung up; Missed drops to 1 day.
 - `done 3` logs and rates in one message.
 - If you never rate a session, it is logged but no review is scheduled for it.

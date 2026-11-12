@@ -11,6 +11,14 @@ def say(db, text, uid=1):
     return handlers.handle(db, uid, "Favour", text)
 
 
+def begin_study(db, course="csc301", topic="binary trees", uid=1):
+    assert "Which course" in say(db, "study", uid)[0].text
+    assert "What are you studying" in say(db, course, uid)[0].text
+    r = say(db, topic, uid)
+    assert "Timer started" in r[0].text
+    return r
+
+
 def make_due(db):
     for r in db.scalars(select(models.Review)).all():
         r.due_on = clock.today_local()
@@ -18,7 +26,7 @@ def make_due(db):
 
 
 def test_full_loop_with_questions(db):
-    r = say(db, "study csc301 binary trees")
+    r = begin_study(db, "csc301", "binary trees")
     assert "Timer started: CSC301: binary trees" in r[0].text
 
     r = say(db, "done")
@@ -47,7 +55,7 @@ def test_full_loop_with_questions(db):
 
 
 def test_missed_recall_resets_and_flags_revision(db):
-    say(db, "study MAT201 limits")
+    begin_study(db, "mat201", "limits")
     say(db, "done 1")  # rating inline
     review = db.scalars(select(models.Review)).one()
     assert review.step == 0
@@ -67,7 +75,7 @@ def test_missed_recall_resets_and_flags_revision(db):
 
 
 def test_course_buttons_and_recent_topics(db):
-    say(db, "study CSC301 trees")
+    begin_study(db, "CSC301", "trees")
     say(db, "done 2")
     r = say(db, "study")
     assert r[0].buttons[0][0][0] == "CSC301"
@@ -80,16 +88,16 @@ def test_course_buttons_and_recent_topics(db):
 
 def test_typed_topic_flow_and_already_running(db):
     say(db, "addcourse CSC309 Artificial Intelligence")
-    r = say(db, "study csc309")
-    assert "What are you studying" in r[0].text
+    r = say(db, "study csc309")  # shortcut: course given up front
+    assert "What are you studying" in r[0].text and "Added" not in r[0].text
     r = say(db, "search algorithms")
     assert "Timer started: CSC309: search algorithms" in r[0].text
-    assert "already studying" in say(db, "study csc309 other")[0].text
+    assert "already studying" in say(db, "study")[0].text
     assert "Timer cancelled" in say(db, "undo")[0].text
 
 
 def test_users_cannot_touch_each_others_data(db):
-    say(db, "study csc301 trees", uid=1)
+    begin_study(db, "csc301", "trees", uid=1)
     say(db, "done 2", uid=1)
     topic = db.scalars(select(models.Topic)).one()
     course = db.scalars(select(models.Course)).one()
@@ -99,7 +107,7 @@ def test_users_cannot_touch_each_others_data(db):
 
 
 def test_stats_streak_and_export(db):
-    say(db, "study csc301 trees")
+    begin_study(db, "csc301", "trees")
     say(db, "done 3")
     text = say(db, "stats")[0].text
     assert "Streak: 1 day" in text and "CSC301" in text
@@ -120,3 +128,36 @@ def test_unknown_and_stale_inputs(db):
     assert "already" in say(db, "cb:recall:pass")[0].text
     assert "Hi Favour" in say(db, "/start")[0].text
     assert "Hi Favour" in say(db, "/start@stickstudy_bot")[0].text
+
+
+def test_typed_course_is_added_to_the_list_for_next_time(db):
+    begin_study(db, "csc301", "trees")
+    say(db, "done 2")
+
+    r = say(db, "study")
+    assert [b[0] for row in r[0].buttons for b in row] == ["CSC301"]
+    r = say(db, "data structures")  # a new course typed instead of tapped
+    assert "Added Data structures to your courses" in r[0].text
+    say(db, "stacks")
+    say(db, "done 2")
+
+    r = say(db, "study")
+    names = [b[0] for row in r[0].buttons for b in row]
+    assert names == ["CSC301", "Data structures"]
+    r = say(db, "CSC301")  # typing an existing course does not duplicate it
+    assert "Added" not in r[0].text
+    assert db.query(models.Course).count() == 2
+
+
+def test_other_command_cancels_the_course_question(db):
+    assert "Which course" in say(db, "study")[0].text
+    assert "Nothing due" in say(db, "due")[0].text  # "due" is a command, not a course name
+    assert say(db, "study")[0].text.startswith("Which course")
+
+
+def test_command_words_are_not_taken_as_course_or_topic_names(db):
+    say(db, "study")
+    say(db, "csc301")
+    assert "No timer running" in say(db, "done")[0].text  # not saved as a topic called "done"
+    assert db.query(models.Topic).count() == 0
+    assert db.query(models.Course).count() == 1
