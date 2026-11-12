@@ -1,0 +1,7 @@
+fastapi==0.162.5
+uvicorn==0.54.0
+sqlalchemy==2.1.8
+psycopg[binary]==3.3.8
+httpx==0.28.1
+openpyxl==3.1.5
+tzdata==2026.6
