@@ -42,14 +42,14 @@ def answer_callback(callback_id: str) -> None:
         pass
 
 
-def set_webhook(url: str, secret: str) -> dict:
+def set_webhook(url: str, secret: str, drop_pending: bool = False) -> dict:
     r = httpx.post(
         _api("setWebhook"),
         json={
             "url": url,
             "secret_token": secret,
             "allowed_updates": ["message", "callback_query"],
-            "drop_pending_updates": True,
+            "drop_pending_updates": drop_pending,
         },
         timeout=20,
     )
@@ -58,3 +58,11 @@ def set_webhook(url: str, secret: str) -> dict:
 
 def delete_webhook() -> dict:
     return httpx.post(_api("deleteWebhook"), json={"drop_pending_updates": False}, timeout=20).json()
+
+
+def get_me() -> dict:
+    return httpx.get(_api("getMe"), timeout=10).json()
+
+
+def get_webhook_info() -> dict:
+    return httpx.get(_api("getWebhookInfo"), timeout=10).json()

@@ -76,3 +76,44 @@ def test_webhook_returns_200_even_if_sending_fails(monkeypatch, factory):
     monkeypatch.setattr(telegram, "send_reply", boom)
     r = client.post("/telegram/webhook", json=update("help"), headers={"X-Telegram-Bot-Api-Secret-Token": "s3cret"})
     assert r.status_code == 200
+
+
+def test_ensure_webhook_registers_with_own_settings(monkeypatch):
+    calls = []
+    monkeypatch.setattr(telegram, "set_webhook", lambda url, secret, drop_pending=False: calls.append((url, secret)) or {"ok": True})
+    monkeypatch.setattr(config, "BOT_TOKEN", "123:abc")
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setattr(config, "PUBLIC_URL", "https://stick.onrender.com")
+    assert bot.ensure_webhook() == "ok"
+    assert calls == [("https://stick.onrender.com/telegram/webhook", "s3cret")]
+
+
+def test_ensure_webhook_skips_when_unconfigured_and_never_raises(monkeypatch):
+    monkeypatch.setattr(config, "BOT_TOKEN", "")
+    assert bot.ensure_webhook().startswith("skipped")
+    monkeypatch.setattr(config, "BOT_TOKEN", "123:abc")
+    monkeypatch.setattr(config, "WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setattr(config, "PUBLIC_URL", "https://stick.onrender.com")
+
+    def boom(*a, **k):
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(telegram, "set_webhook", boom)
+    assert bot.ensure_webhook() == "failed: RuntimeError"
+
+
+def test_diag_needs_key_and_reveals_no_secrets(monkeypatch, factory):
+    sent, client = setup(monkeypatch, factory)
+    monkeypatch.setattr(config, "BOT_TOKEN", "123:SUPERSECRETTOKEN")
+    monkeypatch.setattr(config, "PUBLIC_URL", "https://stick.onrender.com")
+    monkeypatch.setattr(telegram, "get_me", lambda: {"ok": True, "result": {"username": "stickstudy_bot"}})
+    monkeypatch.setattr(telegram, "get_webhook_info", lambda: {"result": {
+        "url": "https://stick.onrender.com/telegram/webhook", "pending_update_count": 0}})
+    assert client.get("/diag").status_code == 403
+    assert client.get("/diag?key=wrong").status_code == 403
+    r = client.get("/diag?key=k")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["bot"] == "@stickstudy_bot" and body["database"] == "ok"
+    assert body["webhook"]["url"] == body["webhook"]["expected_url"]
+    assert "SUPERSECRETTOKEN" not in r.text and "s3cret" not in r.text

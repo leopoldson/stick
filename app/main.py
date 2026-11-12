@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    logging.getLogger("stick").info("Webhook setup: %s", bot.ensure_webhook())
     yield
 
 
@@ -41,3 +42,11 @@ def tick(key: Optional[str] = Query(default=None), x_tick_key: Optional[str] = H
     if config.TICK_KEY and (key or x_tick_key) != config.TICK_KEY:
         raise HTTPException(status_code=403)
     return bot.send_due_reminders()
+
+
+@app.get("/diag")
+def diag(key: Optional[str] = Query(default=None), x_tick_key: Optional[str] = Header(default=None)):
+    """Open /diag?key=<TICK_KEY> in a browser to see what is (not) configured."""
+    if not config.TICK_KEY or (key or x_tick_key) != config.TICK_KEY:
+        raise HTTPException(status_code=403)
+    return bot.diagnostics()

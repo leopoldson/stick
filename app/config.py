@@ -31,4 +31,5 @@ DATABASE_URL = _database_url()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 TICK_KEY = os.getenv("TICK_KEY", "")
-PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
+# On Render, RENDER_EXTERNAL_URL is the service address, so PUBLIC_URL is optional there.
+PUBLIC_URL = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")

@@ -22,8 +22,11 @@ Run the tests with `pip install -r requirements-dev.txt && pytest`.
    - `TELEGRAM_BOT_TOKEN`: from BotFather
    - `DATABASE_URL`: the Internal Database URL from step 2
    - `WEBHOOK_SECRET` and `TICK_KEY`: any long random strings you make up
-4. When it's live, put the same token and secret in your local `.env`, add
-   `PUBLIC_URL=https://<your-service>.onrender.com`, and run `python -m app.set_webhook` once.
+4. **The webhook sets itself.** On every start-up the app registers its own address with Telegram, using its own
+   token and `WEBHOOK_SECRET` (Render supplies the address). You don't need to run anything locally.
+   To check, open `https://<your-service>.onrender.com/diag?key=<TICK_KEY>`. It shows whether the token is accepted,
+   what address Telegram is calling, any delivery error, and whether the database is reachable. It never prints secrets.
+   (`python -m app.set_webhook` still exists as a manual fallback.)
 5. **Reminders and keep-awake:** the free web service sleeps after about 15 minutes of silence, so reminders need an outside timer.
    On cron-job.org (free), create a job that calls `https://<your-service>.onrender.com/tick?key=<TICK_KEY>` every 10 minutes.
    `/tick` sends at most one nudge per user per day, only between 08:00 and 21:00 Lagos time.

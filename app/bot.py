@@ -4,7 +4,7 @@ import random
 
 from sqlalchemy import func, select
 
-from . import clock, telegram
+from . import clock, config, telegram
 from .db import SessionLocal
 from .handlers import Reply, handle
 from .models import Review, User
@@ -68,3 +68,48 @@ def send_due_reminders() -> dict:
             user.last_reminded_on = today  # even on failure, so a blocked user isn't retried all day
         db.commit()
     return {"sent": sent}
+
+
+def ensure_webhook() -> str:
+    """Point Telegram at this server. Safe to run on every start-up; queued messages are kept."""
+    if not (config.BOT_TOKEN and config.PUBLIC_URL and config.WEBHOOK_SECRET):
+        return "skipped: set TELEGRAM_BOT_TOKEN, WEBHOOK_SECRET and (off Render) PUBLIC_URL"
+    try:
+        result = telegram.set_webhook(f"{config.PUBLIC_URL}/telegram/webhook", config.WEBHOOK_SECRET)
+        return "ok" if result.get("ok") else f"Telegram refused: {result.get('description')}"
+    except Exception as exc:  # never stop the server from starting
+        return f"failed: {type(exc).__name__}"
+
+
+def diagnostics() -> dict:
+    """Safe-to-read status: no tokens, secrets or passwords appear here."""
+    info: dict = {
+        "token_set": bool(config.BOT_TOKEN),
+        "webhook_secret_set": bool(config.WEBHOOK_SECRET),
+        "tick_key_set": bool(config.TICK_KEY),
+        "public_url": config.PUBLIC_URL or None,
+        "database_is_postgres": config.DATABASE_URL.startswith("postgresql"),
+    }
+    try:
+        me = telegram.get_me()
+        info["bot"] = ("@" + me["result"]["username"]) if me.get("ok") else f"token rejected: {me.get('description')}"
+    except Exception as exc:
+        info["bot"] = f"could not reach Telegram: {type(exc).__name__}"
+    try:
+        wh = telegram.get_webhook_info().get("result", {})
+        info["webhook"] = {
+            "url": wh.get("url"),
+            "expected_url": f"{config.PUBLIC_URL}/telegram/webhook" if config.PUBLIC_URL else None,
+            "pending_update_count": wh.get("pending_update_count"),
+            "last_error_message": wh.get("last_error_message"),
+            "last_error_date": wh.get("last_error_date"),
+        }
+    except Exception as exc:
+        info["webhook"] = f"could not reach Telegram: {type(exc).__name__}"
+    try:
+        with SessionLocal() as db:
+            info["users"] = db.scalar(select(func.count(User.id)))
+        info["database"] = "ok"
+    except Exception as exc:
+        info["database"] = f"error: {type(exc).__name__}"
+    return info
