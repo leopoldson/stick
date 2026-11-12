@@ -85,6 +85,8 @@ def diagnostics() -> dict:
     """Safe-to-read status: no tokens, secrets or passwords appear here."""
     info: dict = {
         "token_set": bool(config.BOT_TOKEN),
+        "token_length": len(config.BOT_TOKEN),
+        "token_had_stray_characters": config.BOT_TOKEN_RAW != config.BOT_TOKEN,
         "webhook_secret_set": bool(config.WEBHOOK_SECRET),
         "tick_key_set": bool(config.TICK_KEY),
         "public_url": config.PUBLIC_URL or None,

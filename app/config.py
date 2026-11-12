@@ -1,6 +1,8 @@
 """Settings, read from the environment (or a local .env file)."""
 import os
+import re
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -18,8 +20,29 @@ def _load_dotenv(path: str = ".env") -> None:
 _load_dotenv()
 
 
+def clean_token(value: str) -> str:
+    """Bot tokens only contain digits, letters, ':', '_' and '-'. Drop stray spaces, quotes, newlines, '<>' and a pasted 'bot' prefix."""
+    v = re.sub(r"[^0-9A-Za-z:_\-]", "", value or "")
+    return v[3:] if v.lower().startswith("bot") else v
+
+
+def clean_secret(value: str) -> str:
+    """Telegram only allows A-Z, a-z, 0-9, '_' and '-' in the webhook secret."""
+    return re.sub(r"[^0-9A-Za-z_\-]", "", value or "")
+
+
+def clean_plain(value: str) -> str:
+    return (value or "").strip().strip("\"'").strip()
+
+
+def clean_url(value: str) -> str:
+    """Keep only scheme://host, so a pasted '/tick?key=...' or trailing slash can't break the webhook address."""
+    parts = urlparse(clean_plain(value))
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+
+
 def _database_url() -> str:
-    url = os.getenv("DATABASE_URL", "sqlite:///./stick.db")
+    url = clean_plain(os.getenv("DATABASE_URL", "")) or "sqlite:///./stick.db"
     # Render hands out postgres:// or postgresql:// URLs; SQLAlchemy needs a driver name.
     for prefix in ("postgres://", "postgresql://"):
         if url.startswith(prefix):
@@ -28,8 +51,9 @@ def _database_url() -> str:
 
 
 DATABASE_URL = _database_url()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
-TICK_KEY = os.getenv("TICK_KEY", "")
+BOT_TOKEN_RAW = os.getenv("TELEGRAM_BOT_TOKEN", "")
+BOT_TOKEN = clean_token(BOT_TOKEN_RAW)
+WEBHOOK_SECRET = clean_secret(os.getenv("WEBHOOK_SECRET", ""))
+TICK_KEY = clean_plain(os.getenv("TICK_KEY", ""))
 # On Render, RENDER_EXTERNAL_URL is the service address, so PUBLIC_URL is optional there.
-PUBLIC_URL = (os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+PUBLIC_URL = clean_url(os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "")
