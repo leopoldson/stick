@@ -3,8 +3,10 @@
 Nothing here knows about Telegram. Button taps arrive as text starting with "cb:",
 so a WhatsApp adapter can reuse all of this later.
 """
+import difflib
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional
@@ -15,6 +17,7 @@ from sqlalchemy.orm import Session
 from . import clock, srs, stats
 from .export import build_workbook
 from .models import Course, Question, RecallLog, Review, StudySession, Topic, User
+from .textfmt import tidy_name
 
 Buttons = list[list[tuple[str, str]]]
 
@@ -28,11 +31,10 @@ class Reply:
 
 WELCOME = (
     "Hi {name}, I'm Stick. I log your study sessions, then bring each topic back right before you'd forget it.\n\n"
-    "study : start a session (pick or type a course, then the topic)\n"
+    "study : start a session now, or log one you already finished\n"
     "done : stop the timer and log it\n"
     "due : what to review today\n"
     "quiz : test yourself\n"
-    "addq question | answer : add a question to your last topic\n"
     "stats : your week and streak\n"
     "export : download your Excel log\n"
     "undo : cancel or delete your last session\n\n"
@@ -42,6 +44,10 @@ COMMAND_NAMES = {
     "start", "help", "study", "done", "due", "quiz", "addq", "stats",
     "export", "undo", "courses", "addcourse",
 }
+MODE_BUTTONS = [[("Start a session now", "cb:begin:now"), ("Log a past session", "cb:begin:past")]]
+DURATION_PROMPT = "How long did you study? For example: 45 minutes or 1h 30m. Send cancel to skip."
+SAFE_RUN = {"study", "due", "quiz", "stats", "export", "courses", "help"}  # buttons may run these
+SUGGESTABLE = ["study", "done", "due", "quiz", "stats", "export", "undo", "courses", "help"]
 PASS_WORDS = {"got it", "got", "pass", "yes", "y"}
 FAIL_WORDS = {"missed", "miss", "fail", "no", "n"}
 
@@ -59,6 +65,20 @@ def parse(text: str) -> tuple[str, str, bool]:
     cmd = parts[0].split("@")[0].lower() if parts else ""
     arg = parts[1].strip() if len(parts) > 1 else ""
     return cmd, arg, slash
+
+
+_DURATION = re.compile(
+    r"^\s*(?:(\d+(?:\.\d+)?)\s*(?:h|hr|hrs|hour|hours))?\s*(?:(\d+)\s*(?:m|min|mins|minute|minutes)?)?\s*$", re.I
+)
+
+
+def parse_duration(text: str) -> Optional[int]:
+    """'45', '45 min', '1h30', '1.5h', '1 hour 30 minutes' -> minutes (1 to 720), else None."""
+    m = _DURATION.match(text or "")
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    total = round(float(m.group(1) or 0) * 60) + int(m.group(2) or 0)
+    return total if 1 <= total <= 720 else None
 
 
 def set_state(user: User, state: Optional[str], **data) -> None:
@@ -98,11 +118,8 @@ def get_user(db: Session, tg_id: int, name: str) -> User:
 
 
 def norm_course(text: str) -> str:
-    """Tidy what the student typed: 'csc301' -> 'CSC301', 'data structures' -> 'Data structures'."""
-    t = " ".join(text.split())[:30]
-    if any(ch.isdigit() for ch in t):
-        return t.upper()
-    return t[:1].upper() + t[1:]
+    """'csc301' -> 'CSC301', 'discrete structures' -> 'Discrete Structures'."""
+    return tidy_name(text)[:30]
 
 
 def get_course(db: Session, user: User, name: str, create: bool = False) -> Optional[Course]:
@@ -122,7 +139,7 @@ def get_course(db: Session, user: User, name: str, create: bool = False) -> Opti
 def get_topic(db: Session, course: Course, name: str) -> Topic:
     topic = db.scalar(select(Topic).where(Topic.course_id == course.id, func.lower(Topic.name) == name.lower()))
     if not topic:
-        topic = Topic(course_id=course.id, name=name)
+        topic = Topic(course_id=course.id, name=tidy_name(name)[:200])
         db.add(topic)
         db.flush()
     return topic
@@ -153,14 +170,20 @@ def handle(db: Session, tg_id: int, name: str, text: str) -> list[Reply]:
     user = get_user(db, tg_id, name)
     cmd, arg, slash = parse(text)
     lowered = text.strip().lower()
-    # While we're asking for a course or topic, a lone word like "due" is a command, not a name.
-    typed = not slash and not (cmd in COMMAND_NAMES and not arg)
+    # While we're asking for a course or topic, a lone word like "due" (or any "done ...") is a command, not a name.
+    typed = not slash and not ((cmd in COMMAND_NAMES and not arg) or cmd == "done")
 
     if cmd == "cb":
         replies = on_callback(db, user, arg)
     elif cmd == "cancel":
         set_state(user, None)
         replies = [Reply("Okay, cancelled.")]
+    elif user.state == "awaiting_mode" and typed:
+        replies = on_mode_typed(db, user, text.strip())
+    elif user.state == "awaiting_duration" and typed:
+        replies = on_duration_typed(db, user, text.strip())
+    elif user.state == "awaiting_weak" and typed:
+        replies = on_weak_typed(db, user, text.strip())
     elif user.state == "awaiting_course" and typed:
         replies = on_course_typed(db, user, text.strip())
     elif user.state == "awaiting_topic" and typed:
@@ -172,7 +195,7 @@ def handle(db: Session, tg_id: int, name: str, text: str) -> list[Reply]:
     elif user.state == "quiz_answering" and not slash:
         replies = reveal_answer(db, user)
     else:
-        if user.state in ("awaiting_course", "awaiting_topic", "quiz_answering"):
+        if user.state in ("awaiting_mode", "awaiting_duration", "awaiting_weak", "awaiting_course", "awaiting_topic", "quiz_answering"):
             set_state(user, None)  # they moved on to a different command
         replies = on_command(db, user, cmd, arg)
 
@@ -198,21 +221,48 @@ def on_command(db: Session, user: User, cmd: str, arg: str) -> list[Reply]:
     fn = table.get(cmd)
     if fn:
         return fn()
-    return [Reply("I didn't catch that. Send help to see what I can do.")]
+    return unknown_command(cmd)
+
+
+def unknown_command(cmd: str) -> list[Reply]:
+    guess = difflib.get_close_matches(cmd, SUGGESTABLE, n=1, cutoff=0.6) if cmd else []
+    if guess:
+        return [Reply(f"Did you mean {guess[0]}?", buttons=[[(f"Run {guess[0]}", f"cb:run:{guess[0]}")]])]
+    return [Reply("I didn't catch that.", buttons=[[("Show commands", "cb:run:help")]])]
 
 
 def on_callback(db: Session, user: User, arg: str) -> list[Reply]:
     kind, _, value = arg.partition(":")
+    pending = get_data(user)
     if kind == "quiz":
         return cmd_quiz(db, user)
+    if kind == "run" and value in SAFE_RUN:
+        return on_command(db, user, value, "")
+    if kind == "begin" and value in ("now", "past"):
+        if active_session(db, user):
+            return cmd_study(db, user, "")
+        if value == "now":
+            return course_prompt(db, user, "Which course are you studying?")
+        set_state(user, "awaiting_duration")
+        return [Reply(DURATION_PROMPT)]
     if kind == "course" and value.isdigit():
         course = db.get(Course, int(value))
         if course and course.user_id == user.id:
-            return ask_topic(db, user, course)
+            minutes = pending.get("minutes") if user.state == "awaiting_course" else None
+            return ask_topic(db, user, course, minutes)
     if kind == "topic" and value.isdigit():
         topic = owned_topic(db, user, int(value))
-        if topic and not active_session(db, user):
-            return begin(db, user, topic)
+        minutes = pending.get("minutes") if user.state == "awaiting_topic" else None
+        if topic and (minutes or not active_session(db, user)):
+            return begin(db, user, topic, minutes)
+    if kind == "weak" and value.isdigit():
+        topic = owned_topic(db, user, int(value))
+        if topic:
+            set_state(user, "awaiting_weak", topic_id=topic.id)
+            return [Reply(
+                f"What tripped you up in {label(topic)}? Send it as a question. If you know the answer, add it after a |. "
+                "I'll mix it into your next quiz. Send cancel when you're done."
+            )]
     if kind == "rate" and value in ("1", "2", "3"):
         return rate(db, user, int(value))
     if kind == "recall" and value in ("pass", "fail"):
@@ -222,49 +272,78 @@ def on_callback(db: Session, user: User, arg: str) -> list[Reply]:
 
 # ---------- studying ----------
 
+def course_prompt(db: Session, user: User, intro: str, minutes: Optional[int] = None) -> list[Reply]:
+    courses = db.scalars(select(Course).where(Course.user_id == user.id).order_by(Course.code)).all()
+    set_state(user, "awaiting_course", minutes=minutes)
+    if not courses:
+        return [Reply(f"{intro} Type its name or code. I'll remember it for next time.")]
+    buttons = chunk([(c.code, f"cb:course:{c.id}") for c in courses], 2)
+    return [Reply(f"{intro} Tap one, or type a new course.", buttons=buttons)]
+
+
 def cmd_study(db: Session, user: User, arg: str) -> list[Reply]:
     current = active_session(db, user)
     if current:
         mins = round((clock.now_utc() - current.started_at).total_seconds() / 60)
-        return [Reply(f"You're already studying {label(current.topic)} ({mins} min in). Send done when you finish, or undo to cancel it.")]
+        since = f"{stats.fmt_minutes(mins)} in" if mins else "just started"
+        return [Reply(f"You're already studying {label(current.topic)} ({since}). Send done when you finish, or undo to cancel it.")]
     if arg:  # shortcut: "study Physics" skips the course question
         return on_course_typed(db, user, arg)
-    courses = db.scalars(select(Course).where(Course.user_id == user.id).order_by(Course.code)).all()
-    set_state(user, "awaiting_course")
-    if not courses:
-        return [Reply("Which course are you studying? Type its name or code (for example CSC301). I'll remember it for next time.")]
-    buttons = chunk([(c.code, f"cb:course:{c.id}") for c in courses], 2)
-    return [Reply("Which course are you studying? Tap one, or type a new course.", buttons=buttons)]
+    set_state(user, "awaiting_mode")
+    return [Reply("Do you want to start a session now, or log one you already finished?", buttons=MODE_BUTTONS)]
+
+
+def on_mode_typed(db: Session, user: User, text: str) -> list[Reply]:
+    lowered = text.lower()
+    if lowered in {"now", "start", "start now", "timer"}:
+        return course_prompt(db, user, "Which course are you studying?")
+    if lowered in {"past", "log", "log past", "earlier", "before", "finished", "forgot"}:
+        set_state(user, "awaiting_duration")
+        return [Reply(DURATION_PROMPT)]
+    return [Reply("Tap one: start now, or log a session you already finished.", buttons=MODE_BUTTONS)]
 
 
 def on_course_typed(db: Session, user: User, text: str) -> list[Reply]:
+    minutes = get_data(user).get("minutes") if user.state == "awaiting_course" else None
     if not norm_course(text):
-        return [Reply("Type the course name or code, for example CSC301.")]
+        return [Reply("Type the course name or code.")]
     existed = get_course(db, user, text) is not None
     course = get_course(db, user, text, create=True)
-    replies = ask_topic(db, user, course)
+    replies = ask_topic(db, user, course, minutes)
     if not existed:
         replies[0].text = f"Added {course.code} to your courses.\n\n" + replies[0].text
     return replies
 
 
-def ask_topic(db: Session, user: User, course: Course) -> list[Reply]:
-    set_state(user, "awaiting_topic", course_id=course.id)
+def ask_topic(db: Session, user: User, course: Course, minutes: Optional[int] = None) -> list[Reply]:
+    set_state(user, "awaiting_topic", course_id=course.id, minutes=minutes)
     recent = db.scalars(select(Topic).where(Topic.course_id == course.id).order_by(Topic.id.desc()).limit(5)).all()
     buttons = [[(t.name[:40], f"cb:topic:{t.id}")] for t in recent] or None
-    hint = "Type the topic, or tap a recent one." if recent else "Type the topic (for example: binary trees)."
-    return [Reply(f"{course.code}. What are you studying? {hint}", buttons=buttons)]
+    hint = "Type the topic, or tap a recent one." if recent else "Type the topic."
+    question = "What did you study?" if minutes else "What are you studying?"
+    return [Reply(f"{course.code}. {question} {hint}", buttons=buttons)]
 
 
 def on_topic_typed(db: Session, user: User, text: str) -> list[Reply]:
-    course = db.get(Course, get_data(user).get("course_id", 0))
+    data = get_data(user)
+    course = db.get(Course, data.get("course_id", 0))
     if not course or course.user_id != user.id:
         set_state(user, None)
         return [Reply("Let's start again. Send study.")]
-    return begin(db, user, get_topic(db, course, text[:200]))
+    return begin(db, user, get_topic(db, course, text[:200]), data.get("minutes"))
 
 
-def begin(db: Session, user: User, topic: Topic) -> list[Reply]:
+RATING_BUTTONS = [[("1 Shaky", "cb:rate:1"), ("2 Okay", "cb:rate:2"), ("3 Solid", "cb:rate:3")]]
+
+
+def begin(db: Session, user: User, topic: Topic, minutes: Optional[int] = None) -> list[Reply]:
+    if minutes:  # logging a session after the fact: no timer, straight to the rating
+        now = clock.now_utc()
+        session = StudySession(user_id=user.id, topic_id=topic.id, started_at=now - timedelta(minutes=minutes), ended_at=now)
+        db.add(session)
+        db.flush()
+        set_state(user, "rating", session_id=session.id)
+        return [Reply(f"Logged {stats.fmt_minutes(minutes)} on {label(topic)}. How solid does it feel?", buttons=RATING_BUTTONS)]
     db.add(StudySession(user_id=user.id, topic_id=topic.id, started_at=clock.now_utc()))
     set_state(user, None)
     return [Reply(f"Timer started: {label(topic)}. Send done when you're finished.")]
@@ -273,14 +352,24 @@ def begin(db: Session, user: User, topic: Topic) -> list[Reply]:
 def cmd_done(db: Session, user: User, arg: str) -> list[Reply]:
     session = active_session(db, user)
     if not session:
-        return [Reply("No timer running. Send study to start one.")]
+        minutes = parse_duration(arg) if arg and arg not in ("1", "2", "3") else None
+        if minutes:
+            return course_prompt(db, user, f"Got it, {stats.fmt_minutes(minutes)}. Which course was it?", minutes)
+        set_state(user, "awaiting_duration")
+        return [Reply("No timer was running. " + DURATION_PROMPT)]
     session.ended_at = clock.now_utc()
     mins = stats.minutes_between(session)
     set_state(user, "rating", session_id=session.id)
     if arg in ("1", "2", "3"):
         return rate(db, user, int(arg))
-    buttons = [[("1 Shaky", "cb:rate:1"), ("2 Okay", "cb:rate:2"), ("3 Solid", "cb:rate:3")]]
-    return [Reply(f"Logged {mins} min on {label(session.topic)}. How solid does it feel?", buttons=buttons)]
+    return [Reply(f"Logged {stats.fmt_minutes(mins)} on {label(session.topic)}. How solid does it feel?", buttons=RATING_BUTTONS)]
+
+
+def on_duration_typed(db: Session, user: User, text: str) -> list[Reply]:
+    minutes = parse_duration(text)
+    if not minutes:
+        return [Reply("I couldn't read that. Try 45 minutes or 1h 30m, or send cancel.")]
+    return course_prompt(db, user, f"Got it, {stats.fmt_minutes(minutes)}. Which course was it?", minutes)
 
 
 def rate(db: Session, user: User, rating: int) -> list[Reply]:
@@ -334,8 +423,8 @@ def reveal_answer(db: Session, user: User) -> list[Reply]:
     data = get_data(user)
     q = db.get(Question, data.get("question_id", 0))
     set_state(user, "quiz_grading", review_id=data.get("review_id"))
-    answer = q.answer if q else "(no answer saved)"
-    return [Reply(f"Answer: {answer}\n\nHow did you do?", buttons=[[("Got it", "cb:recall:pass"), ("Missed", "cb:recall:fail")]])]
+    shown = f"Answer: {q.answer}" if q and q.answer else "That one's from your own tricky list, so check your notes."
+    return [Reply(f"{shown}\n\nHow did you do?", buttons=[[("Got it", "cb:recall:pass"), ("Missed", "cb:recall:fail")]])]
 
 
 def grade(db: Session, user: User, passed: bool) -> list[Reply]:
@@ -349,18 +438,35 @@ def grade(db: Session, user: User, passed: bool) -> list[Reply]:
     remaining = len(due_reviews(db, user))
     if passed:
         text = f"Nice. {label(review.topic)} comes back {when(review.due_on)}."
+        weak_label = "Add a tricky question"
     else:
         text = f"No stress. {label(review.topic)} is back tomorrow and on your revise list. Study it again when you can."
-    buttons = None
+        weak_label = "Add what tripped me up"
+    buttons = [[(weak_label, f"cb:weak:{review.topic_id}")]]
     if remaining:
         text += f" {remaining} more due."
-        buttons = [[("Next one", "cb:quiz")]]
+        buttons.append([("Next one", "cb:quiz")])
     return [Reply(text, buttons=buttons)]
 
 
+def on_weak_typed(db: Session, user: User, text: str) -> list[Reply]:
+    topic = owned_topic(db, user, get_data(user).get("topic_id", 0))
+    if not topic:
+        set_state(user, None)
+        return [Reply("Let's start again. Send quiz.")]
+    prompt, _, answer = text.partition("|")
+    prompt = prompt.strip()[:500]
+    if not prompt:
+        return [Reply("Send it as a question.")]
+    db.add(Question(topic_id=topic.id, prompt=prompt, answer=answer.strip()))
+    db.flush()
+    return [Reply(f"Saved to {label(topic)}. Send another, or anything else to move on.")]
+
+
 def cmd_addq(db: Session, user: User, arg: str) -> list[Reply]:
+    """Power-user shortcut (not in the help list): add a question to the last studied topic."""
     if "|" not in arg:
-        return [Reply("Send it like this: addq What is a stack? | Last in, first out")]
+        return [Reply("Send it as: addq <question> | <answer>")]
     prompt, _, answer = arg.partition("|")
     prompt, answer = prompt.strip(), answer.strip()
     if not prompt or not answer:
@@ -420,9 +526,9 @@ def cmd_courses(db: Session, user: User) -> list[Reply]:
 def cmd_addcourse(db: Session, user: User, arg: str) -> list[Reply]:
     code, _, title = arg.partition(" ")
     if not code:
-        return [Reply("Send it like this: addcourse CSC301 Data Structures")]
+        return [Reply("Send it as: addcourse <code> <title>")]
     course = get_course(db, user, code, create=True)
-    course.title = title.strip()[:120]
+    course.title = tidy_name(title)[:120]
     return [Reply(f"Saved {course.code}" + (f": {course.title}" if course.title else "") + ".")]
 
 

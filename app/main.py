@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import Body, FastAPI, Header, HTTPException, Query
 
-from . import bot, config
+from . import bot, config, maintenance
 from .db import init_db
 
 logging.basicConfig(level=logging.INFO)
@@ -13,6 +13,10 @@ logging.basicConfig(level=logging.INFO)
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    try:
+        logging.getLogger("stick").info("Tidied %s saved names", maintenance.tidy_existing_names())
+    except Exception:
+        logging.getLogger("stick").exception("Name tidy-up skipped")
     logging.getLogger("stick").info("Webhook setup: %s", bot.ensure_webhook())
     yield
 

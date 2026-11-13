@@ -1,6 +1,6 @@
 # Stick
 
-A study coach on Telegram (`@stickstudy_bot`). Text `study`, pick or type a course, then the topic, then `done`, and Stick logs the session
+A study coach on Telegram (`@stickstudy_bot`). Text `study`, choose to start now or log a past session, pick or type a course, then the topic, then `done`, and Stick logs the session
 and brings the topic back at spaced intervals (1, 3, 7, 14, 30 days). Missed it? It returns tomorrow and goes on a revise list.
 Everything exports to Excel.
 
@@ -12,7 +12,7 @@ pip install -r requirements.txt
 cp .env.example .env        # then paste your token after TELEGRAM_BOT_TOKEN=
 python -m app.poll
 ```
-Open `t.me/stickstudy_bot`, send `/start`, then `study`, type a course (say CSC301) and a topic. Data goes to a local `stick.db`.
+Open `t.me/stickstudy_bot`, send `/start`, then `study`, tap **Start a session now**, and type a course and a topic. Data goes to a local `stick.db`.
 Run the tests with `pip install -r requirements-dev.txt && pytest`.
 
 ## 2. Deploy on Render
@@ -39,7 +39,6 @@ study - Start a study session
 done - Stop and log it
 due - What to review today
 quiz - Test yourself
-addq - Add a quiz question
 stats - Your week and streak
 export - Download your Excel log
 undo - Cancel or delete your last session
@@ -48,9 +47,12 @@ help - Show commands
 Also `/setdescription` and `/setuserpic`. If the token ever leaks, revoke it with `/revoke` in BotFather.
 
 ## Behaviour worth knowing
+- Course names, topics and course titles are saved in title case (`discrete structures` becomes `Discrete Structures`, `csc301` becomes `CSC301`). Names saved earlier are tidied automatically when the app starts.
 - Courses you type are added to your list automatically; next time `study` shows them as buttons. `study Physics` skips the course question.
 - Rating after a session sets the first review: Shaky 1 day, Okay 3 days, Solid 7 days. Got it moves one rung up; Missed drops to 1 day.
-- `done 3` logs and rates in one message.
+- `done 3` logs and rates in one message. Forgot the timer? `study` then **Log a past session** (or the shortcut `done 45` / `done 1h 30m`) logs it after the fact: Stick asks for the course and topic, then how solid it felt.
+- After a quiz, a button lets you add what tripped you up. Those questions join that topic's next quiz. (`addq <question> | <answer>` still works as a shortcut.)
+- Mistype a command (`stata`) and Stick offers the right one as a button.
 - If you never rate a session, it is logged but no review is scheduled for it.
 - `undo` cancels a running timer, or deletes the last session (its review schedule stays as it was).
 - Days (due dates, streaks) use Lagos time. Timestamps are stored in UTC.
@@ -62,7 +64,8 @@ Also `/setdescription` and `/setuserpic`. If the token ever leaks, revoke it wit
 app/handlers.py   commands and conversation flow (channel-independent)
 app/srs.py        the review ladder
 app/stats.py      weekly totals, streak, recall score
-app/export.py     Excel workbook
+app/export.py     Excel workbook (columns size themselves to the content)
+app/textfmt.py    title-casing for course and topic names
 app/bot.py        Telegram updates in, reminders out
 app/main.py       FastAPI: /telegram/webhook, /tick, /health
 app/poll.py       local runner

@@ -14,10 +14,14 @@ def minutes_between(s: StudySession) -> int:
 
 
 def fmt_minutes(m: int) -> str:
+    """Spoken style, like '1 minute' or '1 hour 20 minutes'."""
     h, mm = divmod(m, 60)
-    if h and mm:
-        return f"{h}h {mm}m"
-    return f"{h}h" if h else f"{mm}m"
+    parts = []
+    if h:
+        parts.append(f"{h} hour{'s' if h != 1 else ''}")
+    if mm or not h:
+        parts.append(f"{mm} minute{'s' if mm != 1 else ''}")
+    return " ".join(parts)
 
 
 def finished_sessions(db: Session, user: User, since=None):
