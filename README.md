@@ -36,6 +36,7 @@ Run the tests with `pip install -r requirements-dev.txt && pytest`.
 `/setcommands`, choose your bot, paste:
 ```
 study - Start a study session
+log - Log a session you already finished
 done - Stop and log it
 due - What to review today
 quiz - Test yourself
@@ -48,9 +49,11 @@ Also `/setdescription` and `/setuserpic`. If the token ever leaks, revoke it wit
 
 ## Behaviour worth knowing
 - Course names, topics and course titles are saved in title case (`discrete structures` becomes `Discrete Structures`, `csc301` becomes `CSC301`). Names saved earlier are tidied automatically when the app starts.
+- `done` on a timer from an earlier day, or one running more than 5 hours, asks when you really stopped (`11:30pm`, `yesterday 11:30pm`, or tap Just now). `done 5pm` gives the stop time in one message.
 - Courses you type are added to your list automatically; next time `study` shows them as buttons. `study Physics` skips the course question.
 - Rating after a session sets the first review: Shaky 1 day, Okay 2 days, Solid 3 days. (How solid it *felt* right after studying is a weak signal, so even Solid comes back within days. Change `FIRST_REVIEW` in `app/srs.py` to tune it.) Got it moves one rung up; Missed drops to 1 day.
-- `done 3` logs and rates in one message. Forgot the timer? `study` then **Log a past session** (or the shortcut `done 45` / `done 1h 30m`) logs it after the fact: Stick asks for the course and topic, then how solid it felt.
+- `/myid` shows your Telegram ID. Set it as `OWNER_TG_ID` and you can send one message to every Telegram user with `announce <message>`: Stick shows a preview and the audience size, and only sends after you tap **Send to everyone**.
+- `done 3` logs and rates in one message. Forgot the timer? `log` (or `study`, then **Log a past session**) asks for the day, the start time and the stop time (`9pm`, `19:30`, or a length like `45 minutes`), then course, topic and how solid it felt. `done 45` is a shortcut for 45 minutes ending just now, and Stick says so.
 - A Shaky rating asks what felt shaky. Send topics or questions and they join that topic's quizzes. Every saved session then shows command buttons (Quiz me, Study again, My stats, All commands).
 - Milestone messages appear on your first, fifth, tenth, 25th, 50th and 100th session (and every 100 after).
 - A course typed with its title (`csc301 data structures`) is split into code and title. The Excel Courses & Topics sheet only shows a Title column if at least one course has one.
@@ -71,6 +74,7 @@ app/srs.py        the review ladder
 app/stats.py      weekly totals, streak, recall score
 app/export.py     Excel workbook (columns size themselves to the content)
 app/textfmt.py    title-casing for course and topic names
+app/timeparse.py  reads typed dates and times (9pm, 2130, yesterday, 12 nov)
 app/bot.py        Telegram updates in, reminders out
 app/main.py       FastAPI: /telegram/webhook, /tick, /health
 app/whatsapp.py   WhatsApp Cloud API client (webhook parsing, replies, template reminders)

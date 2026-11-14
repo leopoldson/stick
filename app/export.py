@@ -191,6 +191,13 @@ def _dashboard(wb, rows, sessions, recall_logs):
     return ws
 
 
+def _ended_text(s) -> str:
+    """HH:MM, with '(+1 day)' when the session ran past midnight so an early end time still makes sense."""
+    end = clock.to_local_naive(s.ended_at)
+    text = end.strftime("%H:%M")
+    return text + " (+1 day)" if end.date() != clock.to_local_naive(s.started_at).date() else text
+
+
 def build_workbook(db: Session, user: User) -> bytes:
     wb = Workbook()
     wb.remove(wb.active)
@@ -210,19 +217,19 @@ def build_workbook(db: Session, user: User) -> bytes:
 
     log = _sheet(
         wb, "Daily Study Log",
-        ["Date", "Course", "Topic", "Started", "Ended", "Minutes", "How solid"],
+        ["Date", "Course", "Topic", "Started", "Ended", "Minutes", "Duration", "How solid"],
         [
             [
                 clock.local_date(s.started_at), s.topic.course.code, s.topic.name,
                 clock.to_local_naive(s.started_at).strftime("%H:%M"),
-                clock.to_local_naive(s.ended_at).strftime("%H:%M"),
-                stats.minutes_between(s), RATING.get(s.rating, ""),
+                _ended_text(s),
+                stats.minutes_between(s), stats.fmt_minutes(stats.minutes_between(s)), RATING.get(s.rating, ""),
             ]
             for s in sessions
         ],
-        date_cols=(1,), centre_cols=(4, 5, 6, 7),
+        date_cols=(1,), centre_cols=(4, 5, 6, 7, 8),
     )
-    for row in log.iter_rows(min_row=2, min_col=7, max_col=7):
+    for row in log.iter_rows(min_row=2, min_col=8, max_col=8):
         for cell in row:
             if cell.value in RATING_FILL:
                 cell.fill = _fill(RATING_FILL[cell.value])

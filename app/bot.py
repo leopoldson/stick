@@ -1,6 +1,7 @@
 """Glue between Telegram updates and the handlers. Used by the web app and by local polling."""
 import logging
 import random
+import time
 
 from sqlalchemy import func, select
 
@@ -38,6 +39,10 @@ def process_update(update: dict) -> None:
             replies = handle(db, sender["id"], sender.get("first_name", ""), text)
         for reply in replies:
             telegram.send_reply(chat["id"], reply)
+            if reply.broadcast:
+                sent, failed = broadcast(reply.broadcast, exclude_tg_id=sender["id"])
+                note = f"Done. Delivered to {sent}" + (f", {failed} couldn't be reached (they may have blocked the bot)." if failed else ".")
+                telegram.send_reply(chat["id"], Reply(note))
     except Exception:
         # Always answer Telegram with 200, or it re-sends the same update and the command runs twice.
         log.exception("Failed to handle update")
@@ -45,6 +50,21 @@ def process_update(update: dict) -> None:
             telegram.send_reply(chat["id"], Reply("Something went wrong on my side. Try again in a moment."))
         except Exception:
             log.exception("Could not send the error message either")
+
+
+def broadcast(text: str, exclude_tg_id=None) -> tuple[int, int]:
+    """Send one message to every Telegram user. Returns (delivered, failed). Slightly paced to stay under Telegram's limits."""
+    with SessionLocal() as db:
+        ids = [u.tg_id for u in db.scalars(select(User).where(User.tg_id.is_not(None))).all() if u.tg_id != exclude_tg_id]
+    delivered = failed = 0
+    for tg_id in ids:
+        try:
+            ok = telegram.send_reply(tg_id, Reply(text))
+        except Exception:
+            ok = False
+        delivered, failed = (delivered + 1, failed) if ok is not False else (delivered, failed + 1)
+        time.sleep(0.05)
+    return delivered, failed
 
 
 def _remind(user: User, count: int) -> None:

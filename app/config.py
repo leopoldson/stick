@@ -67,3 +67,7 @@ WHATSAPP_APP_SECRET = re.sub(r"[^0-9A-Za-z]", "", os.getenv("WHATSAPP_APP_SECRET
 WHATSAPP_API_VERSION = clean_plain(os.getenv("WHATSAPP_API_VERSION", "")) or "v23.0"
 WHATSAPP_REMINDER_TEMPLATE = clean_plain(os.getenv("WHATSAPP_REMINDER_TEMPLATE", "")) or "study_review_due"
 PRIVACY_CONTACT = clean_plain(os.getenv("PRIVACY_CONTACT", "")) or "the person who runs Stick (see the Stick GitHub page)"
+
+# Your own Telegram id (send /myid to the bot to see it). Only this person can use /announce.
+_owner = re.sub(r"\D", "", os.getenv("OWNER_TG_ID", ""))
+OWNER_TG_ID = int(_owner) if _owner else None

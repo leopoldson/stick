@@ -124,12 +124,12 @@ def test_stats_streak_and_export(db):
     wb = load_workbook(BytesIO(doc[1]))
     assert {"Dashboard", "Daily Study Log", "Revision Tracker", "Active Recall", "Courses & Topics"} <= set(wb.sheetnames)
     log = wb["Daily Study Log"]
-    assert log["B2"].value == "CSC301" and log["C2"].value == "Trees" and log["G2"].value == "Solid"
+    assert log["B2"].value == "CSC301" and log["C2"].value == "Trees" and log["H2"].value == "Solid"
 
 
 def test_unknown_and_stale_inputs(db):
     assert "didn't catch" in say(db, "blah")[0].text
-    assert "How long did you study" in say(db, "done")[0].text
+    assert "Which day" in say(db, "done")[0].text
     assert "Nothing to undo" in say(db, "undo")[0].text
     assert "expired" in say(db, "cb:rate:9")[0].text
     assert "already" in say(db, "cb:recall:pass")[0].text
@@ -165,7 +165,7 @@ def test_other_command_cancels_the_course_question(db):
 def test_command_words_are_not_taken_as_course_or_topic_names(db):
     study_now(db)
     say(db, "csc301")
-    assert "How long did you study" in say(db, "done")[0].text  # not saved as a topic called "done"
+    assert "Which day" in say(db, "done")[0].text  # not saved as a topic called "done"
     assert db.query(models.Topic).count() == 0
     assert db.query(models.Course).count() == 1
 
@@ -184,8 +184,8 @@ def test_spoken_durations():
 
 
 def test_forgot_the_timer_log_after_the_fact(db):
-    r = say(db, "done 45")  # no timer running: 45 is minutes, not a rating
-    assert "Got it, 45 minutes" in r[0].text and "Type its name" in r[0].text
+    r = say(db, "done 45")  # no timer running: 45 minutes ending now, and Stick says so
+    assert "ending just now" in r[0].text and "Which course was it?" in r[0].text and "Type its name" in r[0].text
     r = say(db, "csc301")
     assert "What did you study" in r[0].text and "Added CSC301" in r[0].text
     r = say(db, "trees")
@@ -200,13 +200,6 @@ def test_forgot_the_timer_log_after_the_fact(db):
 def stats_minutes(session):
     from app import stats
     return stats.minutes_between(session)
-
-
-def test_forgot_the_timer_asks_for_the_duration_first(db):
-    assert "How long did you study" in say(db, "done")[0].text
-    assert "couldn't read" in say(db, "abc")[0].text
-    r = say(db, "1h 30m")
-    assert "1 hour 30 minutes" in r[0].text
 
 
 def test_forgot_the_timer_with_buttons(db):
@@ -288,8 +281,8 @@ def test_export_looks_tidy(db):
     wb = load_workbook(BytesIO(say(db, "export")[0].document[1]))
     assert wb.sheetnames[0] == "Dashboard" and wb["Dashboard"]["A1"].value == "Stick study log"
     log = wb["Daily Study Log"]
-    assert log.freeze_panes == "A2" and log.auto_filter.ref.startswith("A1:G")
-    assert log["G2"].fill.fgColor.rgb.endswith("FFC7CE")  # Shaky is shaded red
+    assert log.freeze_panes == "A2" and log.auto_filter.ref.startswith("A1:H")
+    assert log["H2"].fill.fgColor.rgb.endswith("FFC7CE")  # Shaky is shaded red
     assert wb["Active Recall"]["A2"].value == "Nothing here yet"
 
 
@@ -299,12 +292,7 @@ def test_study_asks_whether_to_start_now_or_log_a_past_session(db):
     assert labels == ["Start a session now", "Log a past session"]
 
     r = say(db, "cb:begin:past")
-    assert "How long did you study" in r[0].text
-    r = say(db, "45")
-    assert "Got it, 45 minutes" in r[0].text
-    say(db, "csc301")
-    r = say(db, "logic gates")
-    assert "Logged 45 minutes on CSC301: Logic Gates" in r[0].text
+    assert "Which day" in r[0].text and [b[0] for b in r[0].buttons[0]] == ["Today", "Yesterday", "2 days ago"]
 
 
 def test_mode_can_be_typed_instead_of_tapped(db):
@@ -312,7 +300,7 @@ def test_mode_can_be_typed_instead_of_tapped(db):
     assert "Which course" in say(db, "now")[0].text
     say(db, "cancel")
     say(db, "study")
-    assert "How long did you study" in say(db, "past")[0].text
+    assert "Which day" in say(db, "past")[0].text
     say(db, "cancel")
     say(db, "study")
     r = say(db, "hmm")
