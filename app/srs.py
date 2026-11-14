@@ -2,13 +2,14 @@
 from datetime import date, timedelta
 
 INTERVALS = [1, 3, 7, 14, 30]
-# How solid it felt after studying decides where on the ladder the first review lands.
-START_STEP = {1: 0, 2: 1, 3: 2}  # shaky, okay, solid
+# First review after studying. How solid it *felt* right afterwards is a weak signal (new material always feels
+# familiar for a few hours), so even "solid" comes back within days: (ladder step, gap in days).
+FIRST_REVIEW = {1: (0, 1), 2: (0, 2), 3: (1, 3)}  # shaky, okay, solid
 
 
 def after_study(rating: int, today: date) -> tuple[int, date]:
-    step = START_STEP[rating]
-    return step, today + timedelta(days=INTERVALS[step])
+    step, gap = FIRST_REVIEW[rating]
+    return step, today + timedelta(days=gap)
 
 
 def after_recall(step: int, passed: bool, today: date) -> tuple[int, date, bool]:

@@ -108,29 +108,39 @@ def chunk(items: list, n: int) -> list[list]:
     return [items[i:i + n] for i in range(0, len(items), n)]
 
 
-def get_user(db: Session, tg_id: int, name: str) -> User:
-    user = db.scalar(select(User).where(User.tg_id == tg_id))
+def get_user(db: Session, identity, name: str) -> tuple[User, bool, str]:
+    """identity is a Telegram id (int) or ("wa", "<phone number>"). Returns (user, was_just_created, channel)."""
+    channel, ext = ("tg", identity) if isinstance(identity, int) else identity
+    column = User.tg_id if channel == "tg" else User.wa_id
+    user = db.scalar(select(User).where(column == ext))
+    created = False
     if not user:
-        user = User(tg_id=tg_id, name=name or "")
+        user = User(name=name or "", **({"tg_id": ext} if channel == "tg" else {"wa_id": ext}))
         db.add(user)
         db.flush()
-    return user
+        created = True
+    return user, created, channel
 
 
-def norm_course(text: str) -> str:
-    """'csc301' -> 'CSC301', 'discrete structures' -> 'Discrete Structures'."""
-    return tidy_name(text)[:30]
+def split_course(text: str) -> tuple[str, str]:
+    """'csc301 data structures' -> ('CSC301', 'Data Structures'); 'discrete structures' -> ('Discrete Structures', '')."""
+    name = tidy_name(text)
+    first, _, rest = name.partition(" ")
+    if rest and any(ch.isdigit() for ch in first) and len(first) <= 12:
+        return first[:30], rest[:120]
+    return name[:30], ""
 
 
 def get_course(db: Session, user: User, name: str, create: bool = False) -> Optional[Course]:
-    name = norm_course(name)
-    if not name:
+    code, title = split_course(name)
+    if not code:
         return None
-    course = db.scalar(
-        select(Course).where(Course.user_id == user.id, func.upper(Course.code) == name.upper())
-    )
-    if not course and create:
-        course = Course(user_id=user.id, code=name)
+    course = db.scalar(select(Course).where(Course.user_id == user.id, func.upper(Course.code) == code.upper()))
+    if course:
+        if title and not course.title:
+            course.title = title
+    elif create:
+        course = Course(user_id=user.id, code=code, title=title)
         db.add(course)
         db.flush()
     return course
@@ -166,14 +176,19 @@ def due_reviews(db: Session, user: User) -> list[Review]:
 
 # ---------- entry point ----------
 
-def handle(db: Session, tg_id: int, name: str, text: str) -> list[Reply]:
-    user = get_user(db, tg_id, name)
+def handle(db: Session, identity, name: str, text: str) -> list[Reply]:
+    user, created, channel = get_user(db, identity, name)
+    if channel == "wa":
+        user.last_inbound_at = clock.now_utc()  # opens WhatsApp's 24-hour reply window
     cmd, arg, slash = parse(text)
     lowered = text.strip().lower()
     # While we're asking for a course or topic, a lone word like "due" (or any "done ...") is a command, not a name.
     typed = not slash and not ((cmd in COMMAND_NAMES and not arg) or cmd == "done")
 
-    if cmd == "cb":
+    if created and channel == "wa" and cmd != "cb" and cmd not in COMMAND_NAMES:
+        # WhatsApp has no /start, so greet a brand-new person whatever their first message was
+        replies = [Reply(WELCOME.format(name=user.name or "there"), buttons=[[("Start studying", "cb:run:study")]])]
+    elif cmd == "cb":
         replies = on_callback(db, user, arg)
     elif cmd == "cancel":
         set_state(user, None)
@@ -237,6 +252,8 @@ def on_callback(db: Session, user: User, arg: str) -> list[Reply]:
     if kind == "quiz":
         return cmd_quiz(db, user)
     if kind == "run" and value in SAFE_RUN:
+        if user.state in TRANSIENT:
+            set_state(user, None)  # tapping a command button leaves any half-finished question
         return on_command(db, user, value, "")
     if kind == "begin" and value in ("now", "past"):
         if active_session(db, user):
@@ -305,7 +322,7 @@ def on_mode_typed(db: Session, user: User, text: str) -> list[Reply]:
 
 def on_course_typed(db: Session, user: User, text: str) -> list[Reply]:
     minutes = get_data(user).get("minutes") if user.state == "awaiting_course" else None
-    if not norm_course(text):
+    if not split_course(text)[0]:
         return [Reply("Type the course name or code.")]
     existed = get_course(db, user, text) is not None
     course = get_course(db, user, text, create=True)
@@ -331,6 +348,36 @@ def on_topic_typed(db: Session, user: User, text: str) -> list[Reply]:
         set_state(user, None)
         return [Reply("Let's start again. Send study.")]
     return begin(db, user, get_topic(db, course, text[:200]), data.get("minutes"))
+
+
+AFTER_BUTTONS = [
+    [("Quiz me", "cb:run:quiz"), ("Study again", "cb:run:study")],
+    [("My stats", "cb:run:stats"), ("All commands", "cb:run:help")],
+]
+TRANSIENT = {"awaiting_mode", "awaiting_duration", "awaiting_weak", "awaiting_course", "awaiting_topic", "quiz_answering"}
+MILESTONES = {
+    1: "That's your first session logged. Every streak starts here.",
+    5: "That's your fifth session. This is turning into a habit.",
+    10: "Tenth session logged. Double digits.",
+    25: "Twenty-fifth session. A quarter of the way to a hundred.",
+    50: "Your fiftieth session. That's real consistency.",
+    100: "Your hundredth session logged. Serious dedication.",
+}
+
+
+def ordinal(n: int) -> str:
+    if 10 <= n % 100 <= 13:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
+def milestone_message(db: Session, user: User) -> str:
+    n = stats.session_count(db, user)
+    if n in MILESTONES:
+        return MILESTONES[n]
+    if n > 100 and n % 100 == 0:
+        return f"Your {ordinal(n)} session logged. Keep going."
+    return ""
 
 
 RATING_BUTTONS = [[("1 Shaky", "cb:rate:1"), ("2 Okay", "cb:rate:2"), ("3 Solid", "cb:rate:3")]]
@@ -383,8 +430,17 @@ def rate(db: Session, user: User, rating: int) -> list[Reply]:
         review.step, review.due_on, review.needs_revision = step, due, False
     else:
         db.add(Review(user_id=user.id, topic_id=session.topic_id, step=step, due_on=due))
+    db.flush()
+    text = f"Saved. I'll bring {label(session.topic)} back {when(due)}."
+    milestone = milestone_message(db, user)
+    if milestone:
+        text += "\n\n" + milestone
+    if rating == 1:  # shaky: find out what to target next time
+        set_state(user, "awaiting_weak", topic_id=session.topic_id)
+        text += "\n\nThat one felt shaky. What exactly was shaky? Send a topic or a question and I'll test you on it. Send as many as you like."
+        return [Reply(text, buttons=[[("Skip", "cb:run:help")]])]
     set_state(user, None)
-    return [Reply(f"Saved. I'll bring {label(session.topic)} back {when(due)}.")]
+    return [Reply(text, buttons=AFTER_BUTTONS)]
 
 
 # ---------- recall ----------
@@ -438,10 +494,10 @@ def grade(db: Session, user: User, passed: bool) -> list[Reply]:
     remaining = len(due_reviews(db, user))
     if passed:
         text = f"Nice. {label(review.topic)} comes back {when(review.due_on)}."
-        weak_label = "Add a tricky question"
+        weak_label = "Add a tricky one"
     else:
         text = f"No stress. {label(review.topic)} is back tomorrow and on your revise list. Study it again when you can."
-        weak_label = "Add what tripped me up"
+        weak_label = "Add what tripped me"
     buttons = [[(weak_label, f"cb:weak:{review.topic_id}")]]
     if remaining:
         text += f" {remaining} more due."
@@ -460,7 +516,7 @@ def on_weak_typed(db: Session, user: User, text: str) -> list[Reply]:
         return [Reply("Send it as a question.")]
     db.add(Question(topic_id=topic.id, prompt=prompt, answer=answer.strip()))
     db.flush()
-    return [Reply(f"Saved to {label(topic)}. Send another, or anything else to move on.")]
+    return [Reply(f"Saved to {label(topic)}. Send another, or tap a command.", buttons=AFTER_BUTTONS)]
 
 
 def cmd_addq(db: Session, user: User, arg: str) -> list[Reply]:
@@ -484,17 +540,23 @@ def cmd_addq(db: Session, user: User, arg: str) -> list[Reply]:
 
 def cmd_stats(db: Session, user: User) -> list[Reply]:
     per_course, count = stats.week_by_course(db, user)
+    due_now = len(due_reviews(db, user))
     if not count:
-        return [Reply("No sessions in the last 7 days yet. Send study to log one.")]
-    total = sum(per_course.values())
-    lines = [f"Last 7 days: {stats.fmt_minutes(total)} across {count} session{'s' if count != 1 else ''}"]
-    lines += [f"- {code}: {stats.fmt_minutes(m)}" for code, m in sorted(per_course.items(), key=lambda x: -x[1])]
-    s = stats.streak(db, user)
-    lines.append(f"Streak: {s} day{'s' if s != 1 else ''}")
+        lines = ["No sessions in the last 7 days yet. Send study to log one."]
+    else:
+        total = sum(per_course.values())
+        lines = [f"This week: {stats.fmt_minutes(total)} in {stats.plural(count, 'session')}"]
+        top = max(per_course.values())
+        for code, mins in sorted(per_course.items(), key=lambda x: -x[1]):
+            bar = "█" * max(1, round(8 * mins / top))
+            lines.append(f"{code}  {bar}  {stats.fmt_minutes(mins)}")
+    streak, best = stats.streak(db, user), stats.best_streak(db, user)
+    lines.append(f"Streak: {stats.plural(streak, 'day')} (best: {best})" if best > streak else f"Streak: {stats.plural(streak, 'day')}")
     passed, attempts = stats.retention(db, user)
     if attempts:
-        lines.append(f"Recall score: {round(100 * passed / attempts)}% ({passed} of {attempts})")
-    return [Reply("\n".join(lines))]
+        lines.append(f"Recall: {round(100 * passed / attempts)}% ({passed} of {attempts})")
+    lines.append(f"Due now: {due_now}")
+    return [Reply("\n".join(lines), buttons=[[("Quiz me", "cb:run:quiz")]] if due_now else None)]
 
 
 def cmd_undo(db: Session, user: User) -> list[Reply]:
@@ -528,7 +590,8 @@ def cmd_addcourse(db: Session, user: User, arg: str) -> list[Reply]:
     if not code:
         return [Reply("Send it as: addcourse <code> <title>")]
     course = get_course(db, user, code, create=True)
-    course.title = tidy_name(title)[:120]
+    if title.strip():
+        course.title = tidy_name(title)[:120]
     return [Reply(f"Saved {course.code}" + (f": {course.title}" if course.title else "") + ".")]
 
 

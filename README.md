@@ -4,7 +4,7 @@ A study coach on Telegram (`@stickstudy_bot`). Text `study`, choose to start now
 and brings the topic back at spaced intervals (1, 3, 7, 14, 30 days). Missed it? It returns tomorrow and goes on a revise list.
 Everything exports to Excel.
 
-All the logic lives in `app/handlers.py` and knows nothing about Telegram, so a WhatsApp adapter can reuse it later.
+All the logic lives in `app/handlers.py` and knows nothing about Telegram or WhatsApp. `app/bot.py` (Telegram) and `app/whatsapp.py` (WhatsApp) are thin adapters on top. WhatsApp is optional: see `WHATSAPP_SETUP.md`.
 
 ## 1. Run it on your laptop (no hosting needed)
 ```bash
@@ -49,14 +49,19 @@ Also `/setdescription` and `/setuserpic`. If the token ever leaks, revoke it wit
 ## Behaviour worth knowing
 - Course names, topics and course titles are saved in title case (`discrete structures` becomes `Discrete Structures`, `csc301` becomes `CSC301`). Names saved earlier are tidied automatically when the app starts.
 - Courses you type are added to your list automatically; next time `study` shows them as buttons. `study Physics` skips the course question.
-- Rating after a session sets the first review: Shaky 1 day, Okay 3 days, Solid 7 days. Got it moves one rung up; Missed drops to 1 day.
+- Rating after a session sets the first review: Shaky 1 day, Okay 2 days, Solid 3 days. (How solid it *felt* right after studying is a weak signal, so even Solid comes back within days. Change `FIRST_REVIEW` in `app/srs.py` to tune it.) Got it moves one rung up; Missed drops to 1 day.
 - `done 3` logs and rates in one message. Forgot the timer? `study` then **Log a past session** (or the shortcut `done 45` / `done 1h 30m`) logs it after the fact: Stick asks for the course and topic, then how solid it felt.
+- A Shaky rating asks what felt shaky. Send topics or questions and they join that topic's quizzes. Every saved session then shows command buttons (Quiz me, Study again, My stats, All commands).
+- Milestone messages appear on your first, fifth, tenth, 25th, 50th and 100th session (and every 100 after).
+- A course typed with its title (`csc301 data structures`) is split into code and title. The Excel Courses & Topics sheet only shows a Title column if at least one course has one.
+- `stats` shows the week at a glance (time per course as bars, streak and best streak, recall score, reviews due now). The Excel Dashboard adds charts: minutes per day, time by course, and recall score by week.
 - After a quiz, a button lets you add what tripped you up. Those questions join that topic's next quiz. (`addq <question> | <answer>` still works as a shortcut.)
 - Mistype a command (`stata`) and Stick offers the right one as a button.
 - If you never rate a session, it is logged but no review is scheduled for it.
 - `undo` cancels a running timer, or deletes the last session (its review schedule stays as it was).
 - Days (due dates, streaks) use Lagos time. Timestamps are stored in UTC.
 - Telegram bots can't message first: a student has to open the bot and send `/start` once.
+- After updating from an older version, the app adds the new WhatsApp columns to the `users` table on start-up. If an old *local* `stick.db` complains, delete it (dev data only).
 - Tested on SQLite. The same SQLAlchemy code targets Postgres, but your first Render deploy is the real check.
 
 ## Layout
@@ -68,6 +73,8 @@ app/export.py     Excel workbook (columns size themselves to the content)
 app/textfmt.py    title-casing for course and topic names
 app/bot.py        Telegram updates in, reminders out
 app/main.py       FastAPI: /telegram/webhook, /tick, /health
-app/poll.py       local runner
+app/whatsapp.py   WhatsApp Cloud API client (webhook parsing, replies, template reminders)
+app/wa_setup.py   one-off WhatsApp setup calls (register, subscribe, status)
+app/poll.py       local runner (Telegram only)
 tests/            pytest suite
 ```

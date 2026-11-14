@@ -40,8 +40,8 @@ def test_full_loop_with_questions(db):
     r = say(db, "3")
     assert "Saved" in r[0].text
     review = db.scalars(select(models.Review)).one()
-    assert review.step == 2
-    assert review.due_on == clock.today_local() + timedelta(days=7)
+    assert review.step == 1
+    assert review.due_on == clock.today_local() + timedelta(days=3)
     assert "Nothing due" in say(db, "due")[0].text
 
     make_due(db)
@@ -56,7 +56,7 @@ def test_full_loop_with_questions(db):
     r = say(db, "cb:recall:pass")
     assert "comes back" in r[0].text
     db.refresh(review)
-    assert review.step == 3 and review.due_on == clock.today_local() + timedelta(days=14)
+    assert review.step == 2 and review.due_on == clock.today_local() + timedelta(days=7)
 
 
 def test_missed_recall_resets_and_flags_revision(db):
@@ -117,11 +117,12 @@ def test_stats_streak_and_export(db):
     text = say(db, "stats")[0].text
     assert "Streak: 1 day" in text and "CSC301" in text
     assert "1 minute" in text and "1m" not in text
+    assert "█" in text and "Due now: 0" in text and "This week:" in text
 
     doc = say(db, "export")[0].document
     assert doc and doc[0].endswith(".xlsx")
     wb = load_workbook(BytesIO(doc[1]))
-    assert {"Summary", "Daily Study Log", "Revision Tracker", "Active Recall", "Courses & Topics"} <= set(wb.sheetnames)
+    assert {"Dashboard", "Daily Study Log", "Revision Tracker", "Active Recall", "Courses & Topics"} <= set(wb.sheetnames)
     log = wb["Daily Study Log"]
     assert log["B2"].value == "CSC301" and log["C2"].value == "Trees" and log["G2"].value == "Solid"
 
@@ -192,7 +193,8 @@ def test_forgot_the_timer_log_after_the_fact(db):
     assert "Saved" in say(db, "2")[0].text
     session = db.scalars(select(models.StudySession)).one()
     assert stats_minutes(session) == 45
-    assert db.scalars(select(models.Review)).one().step == 1
+    review = db.scalars(select(models.Review)).one()
+    assert review.step == 0 and review.due_on == clock.today_local() + timedelta(days=2)
 
 
 def stats_minutes(session):
@@ -241,7 +243,7 @@ def test_tricky_questions_are_captured_and_quizzed(db):
     say(db, "quiz")
     r = say(db, "missed")
     weak = [b for row in r[0].buttons for b in row if b[1].startswith("cb:weak:")]
-    assert weak and weak[0][0] == "Add what tripped me up"
+    assert weak and weak[0][0] == "Add what tripped me"
 
     assert "What tripped you up" in say(db, weak[0][1])[0].text
     assert "Saved" in say(db, "How do AVL rotations work?")[0].text
@@ -284,7 +286,7 @@ def test_export_looks_tidy(db):
     begin_study(db, "csc301", "trees")
     say(db, "done 1")
     wb = load_workbook(BytesIO(say(db, "export")[0].document[1]))
-    assert wb.sheetnames[0] == "Summary" and wb["Summary"]["A1"].value == "Stick study log"
+    assert wb.sheetnames[0] == "Dashboard" and wb["Dashboard"]["A1"].value == "Stick study log"
     log = wb["Daily Study Log"]
     assert log.freeze_panes == "A2" and log.auto_filter.ref.startswith("A1:G")
     assert log["G2"].fill.fgColor.rgb.endswith("FFC7CE")  # Shaky is shaded red
@@ -370,4 +372,130 @@ def test_excel_columns_fit_their_content(db):
     assert log.row_dimensions[2].height >= 52               # the long row grows to show every line
     assert log.row_dimensions[3].height < log.row_dimensions[2].height
     assert log.column_dimensions["A"].width >= 16           # dates always fit
-    assert wb["Summary"].column_dimensions["A"].width >= len("Recall checks passed")
+    assert wb["Dashboard"].column_dimensions["A"].width >= len("Recall checks passed")
+
+
+def finish(db, course, topic, rating=2, uid=1):
+    """Log one finished session and return the reply that saves the rating."""
+    begin_study(db, course, topic, uid)
+    return say(db, f"done {rating}", uid)
+
+
+def test_shaky_session_asks_what_to_target(db):
+    r = finish(db, "csc301", "trees", rating=1)
+    assert "felt shaky" in r[0].text and r[0].buttons[0][0][0] == "Skip"
+    r = say(db, "Rotations in AVL trees")
+    assert "Saved to CSC301: Trees" in r[0].text
+    labels = [b[0] for row in r[0].buttons for b in row]
+    assert labels == ["Quiz me", "Study again", "My stats", "All commands"]
+    assert "Saved" in say(db, "Why is BST height log n? | Balanced halving")[0].text
+    qs = db.scalars(select(models.Question)).all()
+    assert {(q.prompt, q.answer) for q in qs} == {("Rotations in AVL trees", ""), ("Why is BST height log n?", "Balanced halving")}
+
+
+def test_skipping_the_shaky_question_does_not_save_later_chatter(db):
+    finish(db, "csc301", "trees", rating=1)
+    assert "Hi Favour" in say(db, "cb:run:help")[0].text
+    assert "didn't catch" in say(db, "some random chatter")[0].text
+    assert db.query(models.Question).count() == 0
+
+
+def test_solid_and_okay_sessions_skip_the_question_and_show_commands(db):
+    r = finish(db, "csc301", "trees", rating=3)
+    assert "shaky" not in r[0].text
+    assert [b[0] for row in r[0].buttons for b in row] == ["Quiz me", "Study again", "My stats", "All commands"]
+    assert db.scalars(select(models.User)).one().state is None
+
+
+def test_first_review_gaps_by_rating(db):
+    for i, rating in enumerate((1, 2, 3), start=1):
+        finish(db, "csc301", f"topic {i}", rating=rating)
+        say(db, "cancel")
+    gaps = sorted((r.topic.name, (r.due_on - clock.today_local()).days) for r in db.scalars(select(models.Review)).all())
+    assert gaps == [("Topic 1", 1), ("Topic 2", 2), ("Topic 3", 3)]
+
+
+def test_milestone_messages(db):
+    seen = {}
+    for n in range(1, 11):
+        seen[n] = finish(db, "csc301", f"topic {n}")[0].text
+    assert "first session" in seen[1]
+    assert "fifth session" in seen[5]
+    assert "Tenth session" in seen[10]
+    assert not any(w in seen[n] for n in (2, 3, 4, 6, 7, 8, 9) for w in ("session logged", "habit", "Double digits"))
+
+
+def test_ordinals_and_big_milestones():
+    assert [handlers.ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 101, 111, 200)] == [
+        "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "101st", "111th", "200th"]
+
+
+def test_course_code_and_title_are_split_when_typed_together(db):
+    say(db, "study csc301 data structures")
+    course = db.scalars(select(models.Course)).one()
+    assert (course.code, course.title) == ("CSC301", "Data Structures")
+    say(db, "cancel")
+    say(db, "study csc301")  # typing just the code later finds the same course
+    say(db, "cancel")
+    say(db, "study physics 101")  # no code-like first word: kept whole as the course name
+    codes = sorted(c.code for c in db.scalars(select(models.Course)).all())
+    assert codes == ["CSC301", "Physics 101"]
+
+
+def test_title_is_filled_in_later_if_the_course_had_none(db):
+    say(db, "study csc301")
+    say(db, "cancel")
+    say(db, "study csc301 data structures")
+    assert db.scalars(select(models.Course)).one().title == "Data Structures"
+
+
+def test_excel_title_column_only_when_titles_exist(db):
+    say(db, "study physics")
+    say(db, "cancel")
+    wb = load_workbook(BytesIO(say(db, "export")[0].document[1]))
+    assert [c.value for c in wb["Courses & Topics"][1]] == ["Course", "Topics"]
+    say(db, "study csc301 data structures")
+    say(db, "cancel")
+    wb = load_workbook(BytesIO(say(db, "export")[0].document[1]))
+    assert [c.value for c in wb["Courses & Topics"][1]] == ["Course", "Title", "Topics"]
+
+
+def test_dashboard_says_1_day_not_1_days_and_has_charts(db):
+    import zipfile
+    finish(db, "csc301", "trees", rating=2)
+    data = say(db, "export")[0].document[1]
+    dash = load_workbook(BytesIO(data))["Dashboard"]
+    values = {dash.cell(row=r, column=1).value: dash.cell(row=r, column=2).value for r in range(4, 10)}
+    assert values["Current streak"] == "1 day" and values["Longest streak"] == "1 day"
+    charts = [n for n in zipfile.ZipFile(BytesIO(data)).namelist() if n.startswith("xl/charts/chart")]
+    assert len(charts) == 2  # minutes per day + time by course; the recall chart needs a quiz first
+
+    make_due(db)
+    say(db, "quiz")
+    say(db, "got it")
+    data = say(db, "export")[0].document[1]
+    charts = [n for n in zipfile.ZipFile(BytesIO(data)).namelist() if n.startswith("xl/charts/chart")]
+    assert len(charts) == 3
+
+
+def test_empty_export_has_no_charts_and_a_friendly_note(db):
+    import zipfile
+    data = say(db, "export")[0].document[1]
+    assert not [n for n in zipfile.ZipFile(BytesIO(data)).namelist() if "chart" in n]
+    assert "Charts appear" in load_workbook(BytesIO(data))["Dashboard"]["E4"].value
+
+
+def test_best_streak_counts_the_longest_run_of_days(db):
+    from app import stats
+    begin_study(db, "csc301", "trees")
+    say(db, "done 2")
+    user = db.scalars(select(models.User)).one()
+    topic = db.scalars(select(models.Topic)).one()
+    now = clock.now_utc()
+    for days_ago in (3, 4, 5, 8):  # a 3-day run, then a gap, then a single day
+        db.add(models.StudySession(user_id=user.id, topic_id=topic.id,
+                                   started_at=now - timedelta(days=days_ago), ended_at=now - timedelta(days=days_ago, minutes=-30)))
+    db.commit()
+    from app import stats as s
+    assert s.best_streak(db, user) == 3 and s.streak(db, user) == 1
+    assert "(best: 3)" in say(db, "stats")[0].text
