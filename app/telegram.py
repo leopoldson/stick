@@ -17,7 +17,7 @@ def _markup(buttons) -> dict:
     return {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
 
 
-def send_reply(chat_id: int, reply) -> None:
+def send_reply(chat_id: int, reply) -> bool:
     with httpx.Client(timeout=20) as client:
         if reply.document:
             name, data = reply.document
@@ -33,6 +33,7 @@ def send_reply(chat_id: int, reply) -> None:
             r = client.post(_api("sendMessage"), json=payload)
         if r.status_code != 200:
             log.warning("Telegram send failed (%s): %s", r.status_code, r.text[:200])
+        return r.status_code == 200
 
 
 def answer_callback(callback_id: str) -> None:

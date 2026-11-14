@@ -57,3 +57,17 @@ WEBHOOK_SECRET = clean_secret(os.getenv("WEBHOOK_SECRET", ""))
 TICK_KEY = clean_plain(os.getenv("TICK_KEY", ""))
 # On Render, RENDER_EXTERNAL_URL is the service address, so PUBLIC_URL is optional there.
 PUBLIC_URL = clean_url(os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or "")
+
+
+# ---- WhatsApp Cloud API (optional: the bot runs on Telegram alone if these are unset) ----
+WHATSAPP_TOKEN = clean_plain(os.getenv("WHATSAPP_TOKEN", ""))
+WHATSAPP_PHONE_ID = re.sub(r"\D", "", os.getenv("WHATSAPP_PHONE_ID", ""))  # the number's ID, digits only
+WHATSAPP_VERIFY_TOKEN = clean_secret(os.getenv("WHATSAPP_VERIFY_TOKEN", ""))
+WHATSAPP_APP_SECRET = re.sub(r"[^0-9A-Za-z]", "", os.getenv("WHATSAPP_APP_SECRET", ""))
+WHATSAPP_API_VERSION = clean_plain(os.getenv("WHATSAPP_API_VERSION", "")) or "v23.0"
+WHATSAPP_REMINDER_TEMPLATE = clean_plain(os.getenv("WHATSAPP_REMINDER_TEMPLATE", "")) or "study_review_due"
+PRIVACY_CONTACT = clean_plain(os.getenv("PRIVACY_CONTACT", "")) or "the person who runs Stick (see the Stick GitHub page)"
+
+# Your own Telegram id (send /myid to the bot to see it). Only this person can use /announce.
+_owner = re.sub(r"\D", "", os.getenv("OWNER_TG_ID", ""))
+OWNER_TG_ID = int(_owner) if _owner else None

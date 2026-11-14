@@ -26,3 +26,8 @@ def local_date(utc_naive: datetime) -> date:
 
 def to_local_naive(utc_naive: datetime) -> datetime:
     return utc_naive.replace(tzinfo=timezone.utc).astimezone(LAGOS).replace(tzinfo=None)
+
+
+def local_to_utc(naive_local: datetime) -> datetime:
+    """A Lagos wall-clock time -> naive UTC, the way times are stored."""
+    return naive_local.replace(tzinfo=LAGOS).astimezone(timezone.utc).replace(tzinfo=None)

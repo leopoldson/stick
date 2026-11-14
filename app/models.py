@@ -11,7 +11,10 @@ from .db import Base
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
-    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    # One of these identifies the person: tg_id for Telegram users, wa_id (phone number) for WhatsApp users.
+    tg_id: Mapped[Optional[int]] = mapped_column(BigInteger, unique=True, index=True, nullable=True)
+    wa_id: Mapped[Optional[str]] = mapped_column(String(32), unique=True, index=True, nullable=True)
+    last_inbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # WhatsApp's 24-hour window
     name: Mapped[str] = mapped_column(String(100), default="")
     # Tiny conversation state machine: None | awaiting_topic | rating | quiz_answering | quiz_grading
     state: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
@@ -77,3 +80,10 @@ class RecallLog(Base):
     passed: Mapped[bool] = mapped_column(Boolean)
     at: Mapped[datetime] = mapped_column(DateTime, default=clock.now_utc)
     topic: Mapped[Topic] = relationship()
+
+
+class ProcessedMessage(Base):
+    """WhatsApp can deliver the same message twice; remember ids so we answer once."""
+    __tablename__ = "processed_messages"
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, default=clock.now_utc, index=True)
